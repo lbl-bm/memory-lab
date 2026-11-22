@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:frontend-memory-lab:report:0.1.0",
+  "title": "Memory Lab capture report",
+  "type": "object",
+  "required": ["schemaVersion", "runId", "status", "config", "environment", "repo", "scenario", "browser", "samples", "observations", "artifacts", "errors", "scope", "conclusion"],
+  "properties": {
+    "schemaVersion": { "const": "0.1.0" },
+    "runId": { "type": "string" },
+    "status": { "enum": ["running", "completed", "failed"] },
+    "samples": { "type": "array", "items": { "type": "object", "required": ["phase", "cycle", "heap", "dom", "forcedGC"], "properties": { "phase": { "enum": ["baseline", "action", "back", "followup"] }, "cycle": { "type": "integer", "minimum": 0 }, "forcedGC": { "const": true } } } },
+    "conclusion": { "type": "object", "required": ["status", "reasons"], "properties": { "status": { "const": "insufficient-evidence" }, "reasons": { "type": "array", "items": { "type": "string" } } } }
+  }
+}

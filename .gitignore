@@ -1,0 +1,12 @@
+/README.local.md
+/node_modules/
+/runs/
+/configs/
+/scenarios/
+/scripts/
+*.heapsnapshot
+*.heapprofile
+*.cpuprofile
+*.log
+.env
+.env.*

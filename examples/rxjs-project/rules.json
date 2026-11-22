@@ -1,0 +1,7 @@
+{
+  "schemaVersion": "0.1.0",
+  "statement": "Development example: a mounted panel subscribes to a persistent Subject; after synchronous unmount no panel subscription may remain in that primary Subject.",
+  "settle": { "confirmed": true, "statement": "This example has no asynchronous application work; unsubscribe is synchronous and the scenario waits once more after the third unmount." },
+  "workloadChange": { "kind": "controlled-entry-switch", "statement": "The entry changes createApp(false) to createApp(true), enabling the existing unsubscribe at unmount. Scenario and application modules are identical." },
+  "rules": [{ "id": "panel-subscription", "expectation": "bounded-after-back", "maxEntries": 0, "before": { "file": "panel.ts", "line": 5 }, "after": { "file": "panel.ts", "line": 5 } }]
+}

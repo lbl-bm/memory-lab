@@ -1,0 +1,15 @@
+{
+  "name": "frontend-memory-lab",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Local browser memory evidence runner, independent of any coding agent or application repository",
+  "bin": { "memory-lab": "src/cli.mjs" },
+  "scripts": {
+    "test": "node --test",
+    "check": "node --check src/cli.mjs && node --check src/runner.mjs"
+  },
+  "engines": { "node": ">=22.18" },
+  "dependencies": { "esbuild": "0.24.0", "playwright-core": "1.62.1", "rxjs": "7.8.1", "typescript": "6.0.3" },
+  "devDependencies": { "memlab": "2.0.6" }
+}
