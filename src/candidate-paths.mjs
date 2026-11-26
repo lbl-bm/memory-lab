@@ -94,14 +94,19 @@ export function searchCandidatePathsWithFallback(heap, index, targetIds, rootIds
   // A meeting without a shortest proof stays incomplete; its literal witness
   // is retained separately so consumers cannot mistake it for a shortest path.
   const prove = state => state.best && state.best.distance <= front.completeRadius + state.completeRadius;
+  // Yield even within one high-degree node, while preserving each BFS cursor.
+  const sliceEdges = 32;
   let active = states.length;
   while (active && result.stats.examinedEdges < maxEdges) {
     for (const state of states) {
       if (state.done || result.stats.examinedEdges === maxEdges) continue;
       if (!state.started) { state.started = true; fallback.searches++; }
       const current = state.queue[state.head], record = state.records.get(current);
-      for (const edge of index.incomingEdges(describe(current).id)) {
-        if (result.stats.examinedEdges === maxEdges) break;
+      state.incoming ??= index.incomingEdges(describe(current).id)[Symbol.iterator]();
+      let exhausted = false;
+      for (let slice = 0; slice < sliceEdges && result.stats.examinedEdges < maxEdges; slice++) {
+        const { value: edge, done } = state.incoming.next();
+        if (done) { exhausted = true; break; }
         result.stats.examinedEdges++; fallback.examinedEdges++;
         if (edge.type === 'weak' || state.records.has(edge.source.nodeIndex)) continue;
         if (record.depth === result.limits.maxDepth) { state.depthPruned = true; continue; }
@@ -118,7 +123,8 @@ export function searchCandidatePathsWithFallback(heap, index, targetIds, rootIds
       if (state.done) { active--; continue; }
       // An edge-budget stop may occur in the middle of a node. Do not declare
       // the layer complete in that case, even if its last examined edge met.
-      if (result.stats.examinedEdges === maxEdges) continue;
+      if (!exhausted) continue;
+      state.incoming = null;
       state.head++;
       if (state.head === state.layerEnd) {
         state.completeRadius = Math.min(record.depth + 1, result.limits.maxDepth);
