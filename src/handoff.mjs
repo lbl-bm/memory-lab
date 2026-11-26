@@ -1,22 +1,7 @@
-import { readFile, realpath, stat } from 'node:fs/promises';
-import { basename, dirname, isAbsolute, relative, resolve, sep } from 'node:path';
+import { realpath } from 'node:fs/promises';
+import { ownFile, readJSON, resolveCaptureInputs, sameInputHashes } from './capture-evidence.mjs';
+import { basename, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-
-const safeInside = (base, file) => {
-  const rel = relative(base, file);
-  return Boolean(rel && !isAbsolute(rel) && rel !== '..' && !rel.startsWith('..' + sep));
-};
-const readJSON = async path => JSON.parse(await readFile(path, 'utf8'));
-const ownFile = async (base, path) => {
-  if (typeof path !== 'string' || !safeInside(base, resolve(base, path))) return null;
-  try {
-    const real = await realpath(resolve(base, path));
-    return safeInside(base, real) && (await stat(real)).isFile() ? real : null;
-  } catch (error) {
-    if (['ENOENT', 'ENOTDIR'].includes(error.code)) return null;
-    throw error;
-  }
-};
 
 export async function buildHandoff(path, analysisPath) {
   const root = await realpath(resolve(path));
@@ -27,18 +12,12 @@ export async function buildHandoff(path, analysisPath) {
     || !['running', 'completed', 'failed'].includes(r.status) || !Array.isArray(r.artifacts)) {
     throw Error('Not a supported Memory Lab capture report for this run directory');
   }
-  const evidence = { report: reportPath, snapshots: {}, analysis: null };
-  for (const phase of ['baseline', 'target', 'final', 'followup']) {
-    const matches = r.artifacts.filter(x => x?.kind === 'heap-snapshot' && x.phase === phase);
-    if (matches.length === 1) {
-      const artifact = await ownFile(root, matches[0].path);
-      if (artifact && (await stat(artifact)).size === matches[0].bytes && matches[0].bytes > 0) {
-        evidence.snapshots[phase] = artifact;
-      }
-    }
-  }
   const finalPhase = r.samples?.some(x => x.phase === 'followup') ? 'followup' : 'final';
-  const missing = ['baseline', 'target', finalPhase].filter(phase => !evidence.snapshots[phase]);
+  const selected = await resolveCaptureInputs(root, r, finalPhase, analysisPath !== undefined);
+  const {snapshots, missing, issues, hashes, provenance} = selected;
+  const evidence = {report: reportPath, snapshots, analysis: null, snapshotIntegrity: {
+    status: missing.length ? 'incomplete' : provenance, inputs: hashes, issues: Object.fromEntries(missing.map(p => [p, issues[p]])),
+  }};
   const nextActions = [];
   let status, reason;
   if (r.status !== 'completed') {
@@ -46,7 +25,7 @@ export async function buildHandoff(path, analysisPath) {
     reason = r.status === 'failed' ? 'Capture failed. Inspect the recorded stage and error before retrying.' : 'Capture has not finished. Reopen this handoff after it finishes.';
   } else if (missing.length) {
     status = 'snapshots-incomplete';
-    reason = 'Required snapshots are missing or invalid: ' + missing.join(', ') + '.';
+    reason = 'Required snapshots are missing or invalid: ' + missing.map(p => p + ' (' + issues[p] + ')').join(', ') + '.';
   } else {
     status = 'ready-for-analysis';
     reason = 'The required snapshots are available. Meta MemLab can analyze them without recapture.';
@@ -62,21 +41,27 @@ export async function buildHandoff(path, analysisPath) {
       || !['completed', 'failed'].includes(a.status)) {
       throw Error('Analysis does not match this capture run and selected final phase');
     }
-    if (status !== 'ready-for-analysis') throw Error('Cannot use an analysis report without a complete capture and the original snapshot set');
-    evidence.analysis = { report: file, engineVersion: a.engine.version ?? null, candidateCount: null, candidates: null };
-    if (a.status === 'completed') {
-      const candidates = await ownFile(dirname(file), a.candidateFile);
-      if (!candidates || !Number.isSafeInteger(a.candidateCount) || a.candidateCount < 0) throw Error('Analysis candidates are missing or invalid');
-      const rows = await readJSON(candidates);
-      if (!Array.isArray(rows) || rows.length !== a.candidateCount) throw Error('Analysis candidate count does not match the artifact');
-      evidence.analysis.candidates = candidates;
-      evidence.analysis.candidateCount = rows.length;
-      nextActions.length = 0;
-      status = 'review-required';
-      reason = 'Review the candidate paths and expected resource lifetime before deciding whether to make a repair. Zero candidates does not prove no leak.';
-    } else {
+    if (status !== 'ready-for-analysis' || (a.inputSnapshots !== undefined && !sameInputHashes(a.inputSnapshots, hashes))
+      || (provenance === 'verified' && a.inputSnapshots === undefined)) {
       status = 'analysis-incomplete';
-      reason = 'Analysis failed. Review the analysis report before retrying with the same capture.';
+      reason = 'Analysis cannot be attached because its input snapshots are missing or do not match.';
+      nextActions.length = 0;
+    } else {
+      evidence.analysis = { report: file, engineVersion: a.engine.version ?? null, candidateCount: null, candidates: null };
+      if (a.status === 'completed') {
+        const candidates = await ownFile(dirname(file), a.candidateFile);
+        if (!candidates || !Number.isSafeInteger(a.candidateCount) || a.candidateCount < 0) throw Error('Analysis candidates are missing or invalid');
+        const rows = await readJSON(candidates);
+        if (!Array.isArray(rows) || rows.length !== a.candidateCount) throw Error('Analysis candidate count does not match the artifact');
+        evidence.analysis.candidates = candidates;
+        evidence.analysis.candidateCount = rows.length;
+        nextActions.length = 0;
+        status = 'review-required';
+        reason = 'Review the candidate paths and expected resource lifetime before deciding whether to make a repair. Zero candidates does not prove no leak.';
+      } else {
+        status = 'analysis-incomplete';
+        reason = 'Analysis failed. Review the analysis report before retrying with the same capture.';
+      }
     }
   }
 
@@ -110,6 +95,7 @@ export function renderHandoff(h) {
     'Capture: ' + capture.status + ' at ' + (capture.stage ?? 'unknown') + '; comparison phase: ' + capture.finalPhase,
     ...(capture.firstError ? ['Capture error: ' + capture.firstError] : []),
     'Capture report: ' + evidence.report,
+    'Snapshot integrity: ' + evidence.snapshotIntegrity.status,
     ...Object.entries(evidence.snapshots).map(([phase, path]) => phase + ' snapshot: ' + path),
     ...(evidence.analysis ? ['Analysis report: ' + evidence.analysis.report] : []),
     ...(evidence.analysis?.candidates ? ['Candidates (' + evidence.analysis.candidateCount + '): ' + evidence.analysis.candidates] : []),

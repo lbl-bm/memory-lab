@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { readFile, writeFile, mkdir } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, realpath } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
@@ -15,6 +15,7 @@ import { runInterventionCommand } from './intervention-command.mjs';
 import { runIncomingCommand } from './incoming-command.mjs';
 import { runReverseCommand } from './reverse-command.mjs';
 import { runSitesCommand } from './sites-command.mjs';
+import { ownFile, resolveCaptureInputs, sameInputHashes } from './capture-evidence.mjs';
 
 const require = createRequire(import.meta.url);
 const emit = value => process.stdout.write(JSON.stringify(value) + '\n');
@@ -35,19 +36,20 @@ help.commands.push('verify-project --config <project.json> --output <parent-dire
 help.commands.push('resource-regression --before-run <browser-resources.json> --after-run <browser-resources.json> --rules <resource-rules.json> --output <parent-directory>');
 help.commands.push('semantics --snapshot <file> --v8-version <version> --root-ids <ids> --output <parent-directory> [--node-ids <ids>] [--cut-ids <ids>]');
 help.note += ' sites analyzes hash-bound source-site/heap evidence without running the application. Registration/release positions and closed state do not establish a leak or successful resource release.';
+help.commands.push('repair-check --before <run-directory> --after <run-directory> --contract <rule.json> [--json]');
 help.commands.push('handoff --run <run-directory> [--analysis <analysis.json>] [--json]');
 help.commands.push('paths --snapshot <file> --node-id <safe-integer> --root-ids <comma-separated-ids> --output <parent-directory> [--edge-policy exclude-weak|all-literal] [--max-depth 0..64] [--max-nodes 1..50000] [--max-edges 0..200000]');
 
 async function analyze(runDir, finalPhase = 'final') {
   if (!['final', 'followup'].includes(finalPhase)) throw new Error('final-phase must be final or followup');
-  runDir = resolve(runDir);
-  const report = JSON.parse(await readFile(join(runDir, 'report.json'), 'utf8'));
+  runDir = await realpath(resolve(runDir));
+  const reportPath = await ownFile(runDir, 'report.json');
+  if (!reportPath) throw Error('Missing run report');
+  const report = JSON.parse(await readFile(reportPath, 'utf8'));
   if (report.status !== 'completed') throw new Error('Only completed capture runs can be analyzed');
-  const snapshots = ['baseline', 'target', finalPhase].map(phase => {
-    const artifact = report.artifacts.find(a => a.kind === 'heap-snapshot' && a.phase === phase);
-    if (!artifact) throw new Error(`Missing ${phase} snapshot; use run --snapshots`);
-    return artifact.path;
-  });
+  const selected = await resolveCaptureInputs(runDir, report, finalPhase, true);
+  if (selected.missing.length) throw Error('Missing or invalid snapshot: ' + selected.missing.map(p => p + ' (' + selected.issues[p] + ')').join(', '));
+  const snapshots = selected.hashes.map(x => selected.snapshots[x.phase]);
   const memlabRoot = resolve(require.resolve('memlab/package.json'), '..');
   const manifest = JSON.parse(await readFile(join(memlabRoot, 'package.json'), 'utf8'));
   const workDir = join(runDir, 'memlab-' + Date.now());
@@ -68,9 +70,11 @@ async function analyze(runDir, finalPhase = 'final') {
     clearTimeout(timeout);
     await new Promise(resolve => log.end(resolve));
   }
+  const current = code === 0 && !timedOut ? await resolveCaptureInputs(runDir, report, finalPhase, true) : null;
+  const consistent = current ? sameInputHashes(current.hashes, selected.hashes) : null;
   let candidates = null;
-  if (code === 0 && !timedOut) candidates = JSON.parse(await readFile(join(workDir, 'candidates.json'), 'utf8'));
-  const result = { schemaVersion, status: code === 0 && !timedOut ? 'completed' : 'failed', engine: { name: 'memlab', version: manifest.version, api: 'findLeaksBySnapshotFilePaths', exitCode: code, timedOut, maxOldSpaceMiB: 2048, consoleMode: 'SILENT' }, inputRunId: report.runId, inputFinalPhase: finalPhase, workDir, logPath, candidateCount: candidates?.length ?? null, candidateFile: candidates ? join(workDir, 'candidates.json') : null, invocation: { executable: process.execPath, args }, conclusion: { status: 'requires-review', reason: 'MemLab heuristic candidates require scenario, retention-path, and before/after review; this is not a confirmed leak or a repair validation.' } };
+  if (consistent) candidates = JSON.parse(await readFile(join(workDir, 'candidates.json'), 'utf8'));
+  const result = { schemaVersion, status: consistent ? 'completed' : 'failed', engine: { name: 'memlab', version: manifest.version, api: 'findLeaksBySnapshotFilePaths', exitCode: code, timedOut, maxOldSpaceMiB: 2048, consoleMode: 'SILENT' }, inputRunId: report.runId, inputFinalPhase: finalPhase, inputSnapshots: selected.hashes, snapshotProvenance: selected.provenance, inputsMatchAfterAnalysis: consistent, workDir, logPath, candidateCount: candidates?.length ?? null, candidateFile: candidates ? join(workDir, 'candidates.json') : null, invocation: { executable: process.execPath, args }, conclusion: { status: 'requires-review', reason: consistent === false ? 'Snapshot inputs changed during analysis; candidates were not accepted.' : 'MemLab heuristic candidates require scenario, retention-path, and before/after review; this is not a confirmed leak or a repair validation.' } };
   await writeFile(join(workDir, 'analysis.json'), JSON.stringify(result, null, 2) + '\n');
   return result;
 }
@@ -79,7 +83,7 @@ try {
   const [command = 'help', ...args] = process.argv.slice(2);
   if (command === 'help' || command === '--help') { emit(help); }
   else {
-    const allowed = command === 'handoff' ? ['--run', '--analysis', '--json'] : command === 'resource-regression' ? ['--before-run', '--after-run', '--rules', '--output'] : command === 'verify-project' ? ['--config', '--output'] : command === 'resource-heap' ? ['--capture', '--output'] : command === 'candidates' ? ['--series', '--resource-run', '--case', '--root-ids', '--output'] : command === 'semantics' ? ['--snapshot', '--v8-version', '--root-ids', '--output', '--node-ids', '--cut-ids'] : command === 'regression' ? ['--before', '--after', '--contract', '--before-run', '--after-run', '--rules', '--output'] : ['capture-sites', 'capture-resources'].includes(command) ? ['--config'] : command === 'dominators' ? ['--snapshot', '--root-ids', '--output', '--edge-policy', '--node-ids', '--cut-ids', '--top'] : command === 'sites' ? ['--capture', '--output', '--node-id'] : command === 'run' ? ['--config', '--snapshots'] : command === 'doctor' ? ['--config'] : command === 'analyze' ? ['--run', '--final-phase'] : command === 'growth' ? ['--run'] : command === 'paths' ? ['--snapshot', '--node-id', '--root-ids', '--output', '--edge-policy', '--max-depth', '--max-nodes', '--max-edges'] : command === 'incoming' ? ['--snapshot', '--node-id', '--output'] : command === 'evidence' ? ['--run', '--growth', '--identity'] : command === 'lifecycle' ? ['--run', '--identity', '--contract'] : command === 'source' ? ['--run', '--identity', '--scripts', '--contract', '--evidence', '--max-source-bytes', '--growth', '--root-ids', '--max-depth', '--max-nodes', '--max-edges', '--source-map-context'] : command === 'intervention' ? ['--run', '--identity', '--scripts', '--contract', '--observations'] : [];
+    const allowed = command === 'repair-check' ? ['--before', '--after', '--contract', '--json'] : command === 'handoff' ? ['--run', '--analysis', '--json'] : command === 'resource-regression' ? ['--before-run', '--after-run', '--rules', '--output'] : command === 'verify-project' ? ['--config', '--output'] : command === 'resource-heap' ? ['--capture', '--output'] : command === 'candidates' ? ['--series', '--resource-run', '--case', '--root-ids', '--output'] : command === 'semantics' ? ['--snapshot', '--v8-version', '--root-ids', '--output', '--node-ids', '--cut-ids'] : command === 'regression' ? ['--before', '--after', '--contract', '--before-run', '--after-run', '--rules', '--output'] : ['capture-sites', 'capture-resources'].includes(command) ? ['--config'] : command === 'dominators' ? ['--snapshot', '--root-ids', '--output', '--edge-policy', '--node-ids', '--cut-ids', '--top'] : command === 'sites' ? ['--capture', '--output', '--node-id'] : command === 'run' ? ['--config', '--snapshots'] : command === 'doctor' ? ['--config'] : command === 'analyze' ? ['--run', '--final-phase'] : command === 'growth' ? ['--run'] : command === 'paths' ? ['--snapshot', '--node-id', '--root-ids', '--output', '--edge-policy', '--max-depth', '--max-nodes', '--max-edges'] : command === 'incoming' ? ['--snapshot', '--node-id', '--output'] : command === 'evidence' ? ['--run', '--growth', '--identity'] : command === 'lifecycle' ? ['--run', '--identity', '--contract'] : command === 'source' ? ['--run', '--identity', '--scripts', '--contract', '--evidence', '--max-source-bytes', '--growth', '--root-ids', '--max-depth', '--max-nodes', '--max-edges', '--source-map-context'] : command === 'intervention' ? ['--run', '--identity', '--scripts', '--contract', '--observations'] : [];
     if (!allowed.length) throw new Error('Unknown command: ' + command);
     const options = {};
     for (let i = 0; i < args.length; i++) {
@@ -89,7 +93,14 @@ try {
       options[key] = isFlag ? true : args[++i];
       if (!options[key] || (!isFlag && options[key].startsWith('--'))) throw new Error('Missing value for ' + key);
     }
-    if (command === 'handoff') {
+    if (command === 'repair-check') {
+      if (['--before','--after','--contract'].some(key => !options[key])) throw Error('--before, --after and --contract are required');
+      const { checkRepair, renderRepairCheck } = await import('./repair-check.mjs');
+      const result = await checkRepair(options['--before'], options['--after'], options['--contract']);
+      if (options['--json']) emit(result);
+      else process.stdout.write(renderRepairCheck(result));
+      process.exitCode = result.verdict === 'verified-for-rule' ? 0 : result.verdict === 'insufficient-evidence' ? 2 : 3;
+    } else if (command === 'handoff') {
       if (!options['--run']) throw Error('--run is required');
       const { buildHandoff, renderHandoff } = await import('./handoff.mjs');
       const result = await buildHandoff(options['--run'], options['--analysis']);

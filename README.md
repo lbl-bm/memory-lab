@@ -46,3 +46,26 @@ same capture. Meta MemLab candidates are still hypotheses for review, even if
 there are zero candidates. This command never modifies source, captures new
 evidence, or asserts that a repair works. Keep run artifacts local: they can
 contain application data.
+
+New captures hash snapshot bytes while writing. Analysis and handoff check the
+selected phases and keep the exact input digests. Changed or missing evidence
+cannot attach an old candidate report to the run. Old captures are readable
+with `legacy-unverified` provenance.
+
+### Check one declared release rule
+
+```sh
+node src/cli.mjs repair-check --before <before-run> --after <after-run> --contract <rule.json>
+```
+
+Use two captures with snapshots and the same self-contained scenario. The
+scenario must implement a follow-up hook, complete its functional assertions
+in both runs, and emit a nonnegative integer count from `observe` at follow-up.
+Do not change scenario dependencies between runs; the CLI compares the
+top-level scenario digest, not its dependency graph. The rule JSON fields are
+`schemaVersion` (currently `0.1.0`), `id`, `owner`, `releasePoint`,
+`expectationSource`, `diagnosticKey` and `maxRetained`. The check exits 0
+only if the **selected** count breaks the limit before and meets it after
+under the matched workflow. A clean baseline or improvement on a different
+rule is not a repair result. Add `--json` for structured output. A passed rule
+does not prove object collection or that the project has no other leaks.

@@ -86,3 +86,28 @@ test('zero candidates remains unconfirmed; analysis from another run is rejected
   await serialize(aPath, {...analysis,inputRunId:'another-run'});
   assert.equal(invoke('--run', path, '--analysis', aPath, '--json').status, 1);
 });
+
+test('equal-size but different snapshot contents invalidate a captured hash', async t => {
+  const { path, report, r } = await fixture(t);
+  const { createHash } = await import('node:crypto');
+  assert.equal(JSON.parse(invoke('--run',path,'--json').stdout).evidence.snapshotIntegrity.status,'legacy-unverified');
+  r.snapshotIntegrity='sha256-v1';
+  for (const a of r.artifacts) a.sha256=createHash('sha256').update('{}').digest('hex');
+  await serialize(report,r);
+  const ready = JSON.parse(invoke('--run',path,'--json').stdout);
+  assert.equal(ready.evidence.snapshotIntegrity.status,'verified');
+  const workDir = join(path,'analysis'); await mkdir(workDir);
+  const aPath = join(workDir,'analysis.json'), candidateFile=join(workDir,'candidates.json');
+  await serialize(candidateFile,[]);
+  const analysis={schemaVersion:'0.1.0',status:'completed',inputRunId:'run-a',inputFinalPhase:'final',
+    engine:{name:'memlab',version:'2.0.6'},workDir,candidateCount:0,candidateFile,inputSnapshots:ready.evidence.snapshotIntegrity.inputs};
+  await serialize(aPath,analysis);
+  const reopen = () => invoke('--run',path,'--analysis',aPath,'--json');
+  assert.equal(JSON.parse(reopen().stdout).status,'review-required');
+  await writeFile(r.artifacts[1].path,'[]');
+  const bad=reopen(), h=JSON.parse(bad.stdout);
+  assert.equal(bad.status,2);
+  assert.equal(h.evidence.snapshotIntegrity.issues.target,'digest-mismatch');
+  assert.equal(h.evidence.analysis,null);
+  assert.deepEqual(h.nextActions,[]);
+});

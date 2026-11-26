@@ -3,11 +3,12 @@ import { mkdir, readFile, writeFile, stat, unlink, statfs } from 'node:fs/promis
 import { openSync, writeSync, closeSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import os from 'node:os';
 import { isDeepStrictEqual } from 'node:util';
 import { schemaVersion, hash, repoInfo, findBrowser } from './config.mjs';
 import { withDeadline, withBrowserStage } from './deadline.mjs';
+import { integrityVersion } from './capture-evidence.mjs';
 
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
 const saveJSON = (path, value) => writeFile(path, JSON.stringify(value, null, 2) + '\n', 'utf8');
@@ -29,13 +30,20 @@ export async function collectSample(cdp, phase, cycle, settleMs) {
 async function snapshot(cdp, path, maxBytes) {
   const fd = openSync(path, 'wx');
   let bytes = 0;
+  const digest = createHash('sha256');
   let failure = null;
   const listener = ({ chunk }) => {
     if (failure) return;
     try {
-      bytes += Buffer.byteLength(chunk);
+      const buf = Buffer.from(chunk);
+      bytes += buf.length;
       if (bytes > maxBytes) throw new Error('Snapshot exceeded the 256 MiB per-file limit');
-      writeSync(fd, chunk, null, 'utf8');
+      for (let offset = 0; offset < buf.length;) {
+        const written = writeSync(fd, buf, offset, buf.length - offset);
+        if (!written) throw Error('Snapshot write made no progress');
+        offset += written;
+      }
+      digest.update(buf);
     } catch (error) { failure = error; }
   };
   cdp.on('HeapProfiler.addHeapSnapshotChunk', listener);
@@ -49,7 +57,7 @@ async function snapshot(cdp, path, maxBytes) {
     closeSync(fd);
   }
   if (failure) { await unlink(path); throw failure; }
-  return { path, bytes: (await stat(path)).size };
+  return { path, bytes: (await stat(path)).size, sha256: digest.digest('hex') };
 }
 
 export async function run(config) {
@@ -58,7 +66,7 @@ export async function run(config) {
   const runDir = join(config.outRoot, runId);
   await mkdir(runDir); // Never overwrite another run.
   const report = {
-    schemaVersion, runId, status: 'running', startedAt: new Date().toISOString(), runDir,
+    schemaVersion, snapshotIntegrity: integrityVersion, runId, status: 'running', startedAt: new Date().toISOString(), runDir,
     config, environment: { node: process.version, platform: process.platform, arch: process.arch, totalMemoryBytes: os.totalmem(), freeMemoryBytesAtStart: os.freemem() },
     repo: null, scenario: null, browser: null, samples: [], observations: [], artifacts: [], errors: [], pageErrors: [], consoleErrors: [],
     network: { policy: 'loopback-only, fresh browser context, no service workers', blockedRequests: [] },

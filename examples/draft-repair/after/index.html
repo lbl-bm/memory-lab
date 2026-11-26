@@ -1,0 +1,21 @@
+<!doctype html><html lang=en><meta charset=utf-8><title>Notes</title>
+<button id="open">Open draft</button><output id="saved"></output><div id="slot"></div>
+<script>
+document.getElementById('open').onclick=()=>{
+  const panel=document.createElement('section');
+  panel.innerHTML='<textarea aria-label="Draft"></textarea><button id="close">Close draft</button>';
+  const draft=panel.querySelector('textarea');
+  draft.value=document.getElementById('saved').textContent;
+  const respond=event=>{
+    event.detail.callbacks++;
+    if(panel.isConnected) event.detail.currentValue=draft.value;
+  };
+  window.addEventListener('draft-observation',respond);
+  panel.querySelector('#close').onclick=()=>{
+    document.getElementById('saved').textContent=draft.value;
+    window.removeEventListener("draft-observation",respond);
+    panel.remove();
+  };
+  document.getElementById('slot').appendChild(panel);
+};
+</script>

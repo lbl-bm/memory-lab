@@ -1,0 +1,1 @@
+{"schemaVersion":"0.1.0","id":"draft-callback-release","owner":"Window draft-observation listener registered by the editor","releasePoint":"After the draft closes and the follow-up wait ends","expectationSource":"The listener serves only the open draft; a closed draft must not respond","diagnosticKey":"draftCallbacks","maxRetained":0}
