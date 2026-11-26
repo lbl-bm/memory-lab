@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { readFile, realpath, stat } from 'node:fs/promises';
-import { isAbsolute, relative, resolve, sep } from 'node:path';
+import { isAbsolute, posix, relative, resolve, sep, win32 } from 'node:path';
 export const integrityVersion = 'sha256-v1';
 
 const safeInside = (base, file) => {
@@ -20,6 +20,25 @@ export const ownFile = async (base, path) => {
   }
 };
 
+// Treat the recorded producer path only as a namespace for relative names.
+// Never open it directly when looking for files in a recipient's copy.
+export function relativeArtifactPath(producerDir, artifactPath) {
+  if (typeof producerDir !== 'string' || typeof artifactPath !== 'string') return null;
+  const syntax = producerDir.startsWith('/') && !producerDir.startsWith('//') ? posix : win32;
+  if (!syntax.isAbsolute(producerDir) || !syntax.isAbsolute(artifactPath)) return null;
+  const rel = syntax.relative(producerDir, artifactPath);
+  if (!rel || syntax.isAbsolute(rel)) return null;
+  const names = rel.split(syntax.sep);
+  if (names.some(name => !name || name === '.' || name === '..' || /[\\:\u0000-\u001f]/.test(name))) return null;
+  return names.join('/');
+}
+
+export function producerRunDir(report) {
+  if (report.snapshotIntegrity !== integrityVersion || typeof report.runDir !== 'string') return null;
+  const syntax = report.runDir.startsWith('/') && !report.runDir.startsWith('//') ? posix : win32;
+  return syntax.isAbsolute(report.runDir) && syntax.basename(report.runDir) === report.runId ? report.runDir : null;
+}
+
 export async function resolveCaptureInputs(root, report, finalPhase, auditLegacy = false) {
   if (!['final', 'followup'].includes(finalPhase)) throw Error('final-phase must be final or followup');
   const hashed = report.snapshotIntegrity === integrityVersion;
@@ -29,7 +48,9 @@ export async function resolveCaptureInputs(root, report, finalPhase, auditLegacy
   for (const phase of ['baseline','target','final','followup']) {
     const artifacts = report.artifacts.filter(x => x?.kind === 'heap-snapshot' && x.phase === phase);
     if (artifacts.length !== 1) { issues[phase] = artifacts.length ? 'duplicate' : 'missing'; continue; }
-    const a = artifacts[0], path = await ownFile(root, a.path);
+    const a = artifacts[0];
+    const mapped = relativeArtifactPath(producerRunDir(report), a.path);
+    const path = await ownFile(root, mapped ?? a.path);
     if (!path || !(a.bytes > 0) || (await stat(path)).size !== a.bytes) { issues[phase] = 'unavailable'; continue; }
     let sha256 = null;
     if (phases.includes(phase) && (hashed || auditLegacy)) {

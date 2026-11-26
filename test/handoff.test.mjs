@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtemp, mkdir, writeFile, rm, symlink, readFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, rm, symlink, readFile, cp, rename } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -110,4 +110,69 @@ test('equal-size but different snapshot contents invalidate a captured hash', as
   assert.equal(h.evidence.snapshotIntegrity.issues.target,'digest-mismatch');
   assert.equal(h.evidence.analysis,null);
   assert.deepEqual(h.nextActions,[]);
+});
+
+test('exact hashed capture and analysis reopen in a new workspace without the producer', async t => {
+  const { tmp, path, report, r } = await fixture(t);
+  const { createHash } = await import('node:crypto');
+  r.snapshotIntegrity = 'sha256-v1';
+  r.runDir = path;
+  for (const a of r.artifacts) a.sha256 = createHash('sha256').update('{}').digest('hex');
+  await serialize(report, r);
+  const original = JSON.parse(invoke('--run', path, '--json').stdout);
+  const workDir = join(path, 'memlab-123');
+  await mkdir(workDir);
+  const candidateFile = join(workDir, 'candidates.json');
+  await serialize(candidateFile, [{ label: 'example' }]);
+  const analysis = {schemaVersion:'0.1.0', status:'completed', inputRunId:r.runId, inputFinalPhase:'final',
+    engine:{name:'memlab', version:'2.0.6'}, workDir, candidateFile, candidateCount:1, inputSnapshots:original.evidence.snapshotIntegrity.inputs};
+  await serialize(join(workDir,'analysis.json'), analysis);
+  const receiver = join(tmp, 'receiver workspace', r.runId);
+  await cp(path, receiver, {recursive:true});
+  await rename(path, path + '-unavailable');
+  const newWorkDir = join(receiver, 'memlab-123');
+  const analysisFile = join(newWorkDir, 'analysis.json');
+  const run = () => invoke('--run', receiver, '--analysis', analysisFile, '--json');
+  const ready = JSON.parse(invoke('--run', receiver, '--json').stdout);
+  assert.equal(ready.status, 'ready-for-analysis');
+  assert.equal(ready.nextActions[0].argv[4], receiver);
+  const attached = JSON.parse(run().stdout);
+  assert.equal(attached.status, 'review-required');
+  assert.deepEqual(attached.evidence.snapshotIntegrity, original.evidence.snapshotIntegrity);
+  assert.equal(attached.evidence.analysis.candidates, join(newWorkDir, 'candidates.json'));
+  assert.match(invoke('--run', receiver, '--analysis', analysisFile).stdout, /Candidates \(1\):/);
+  const copyReport = join(receiver, 'report.json');
+  assert.deepEqual(JSON.parse(await readFile(copyReport, 'utf8')), r);
+  // A recipient can analyze in its own workspace and pass that analysis on again.
+  await serialize(analysisFile, {...analysis, inputRunDir:receiver, workDir:newWorkDir, candidateFile:join(newWorkDir,'candidates.json')});
+  const third = join(tmp,'third workspace',r.runId);
+  await cp(receiver, third, {recursive:true});
+  const thirdHandoff = invoke('--run',third,'--analysis',join(third,'memlab-123','analysis.json'),'--json');
+  assert.equal(JSON.parse(thirdHandoff.stdout).status, 'review-required');
+  await serialize(analysisFile, {...analysis, workDir:join(path,'wrong')});
+  assert.equal(run().status, 1);
+  await serialize(analysisFile, {...analysis, candidateFile:join(path,'outside')});
+  assert.equal(run().status, 1);
+  await serialize(analysisFile, analysis);
+  const actualCandidate = join(newWorkDir, 'candidates.json');
+  await rm(actualCandidate);
+  await symlink(join(path + '-unavailable', 'memlab-123', 'candidates.json'), actualCandidate, 'file');
+  assert.equal(run().status, 1);
+  await serialize(copyReport, {...r, snapshotIntegrity:undefined});
+  const legacy = JSON.parse(invoke('--run', receiver, '--json').stdout);
+  assert.equal(legacy.status, 'snapshots-incomplete');
+  await serialize(copyReport, r);
+  await writeFile(join(receiver, 'target.heapsnapshot'), '[]');
+  const changed = JSON.parse(run().stdout);
+  assert.equal(changed.status, 'analysis-incomplete');
+  assert.equal(changed.evidence.snapshotIntegrity.issues.target, 'digest-mismatch');
+  assert.equal(changed.evidence.analysis, null);
+});
+
+test('producer path syntax does not control how a recipient reads local files', async () => {
+  const { relativeArtifactPath } = await import('../src/capture-evidence.mjs');
+  assert.equal(relativeArtifactPath('D:\\runs\\run-a', 'D:\\runs\\run-a\\memlab-123\\candidates.json'), 'memlab-123/candidates.json');
+  assert.equal(relativeArtifactPath('D:\\runs\\run-a', 'C:\\runs\\run-a\\baseline.heapsnapshot'), null);
+  assert.equal(relativeArtifactPath('/original/run-a', '/original/run-ab/baseline.heapsnapshot'), null);
+  assert.equal(relativeArtifactPath('/original/run-a', '/original/run-a/../baseline.heapsnapshot'), null);
 });

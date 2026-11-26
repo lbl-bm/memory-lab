@@ -24,8 +24,9 @@ The public repository contains tool code, tests, and the self-contained RxJS exa
 
 ### Resume a run as an engineer or an agent
 
-`handoff` is a read-only view of a local capture. Keep the original run directory
-and snapshots, then pass its path to a teammate or coding agent:
+`handoff` is a read-only view of a capture. To transfer a hashed run, copy the
+whole run directory without renaming it or changing its internal layout. Pass
+the recipient's run path to the same CLI; no new capture is needed:
 
 ```sh
 node src/cli.mjs handoff --run <run-directory>
@@ -50,7 +51,10 @@ contain application data.
 New captures hash snapshot bytes while writing. Analysis and handoff check the
 selected phases and keep the exact input digests. Changed or missing evidence
 cannot attach an old candidate report to the run. Old captures are readable
-with `legacy-unverified` provenance.
+with `legacy-unverified` provenance at their original location. Reopening a
+copied analysis requires its input digests and intact analysis subdirectory.
+Source/configuration paths are producer-side context only; copying evidence
+does not copy the application or make its scenario replayable.
 
 ### Check one declared release rule
 

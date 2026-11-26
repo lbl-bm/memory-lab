@@ -1,6 +1,6 @@
 import { realpath } from 'node:fs/promises';
-import { ownFile, readJSON, resolveCaptureInputs, sameInputHashes } from './capture-evidence.mjs';
-import { basename, dirname, resolve } from 'node:path';
+import { ownFile, producerRunDir, readJSON, relativeArtifactPath, resolveCaptureInputs, sameInputHashes } from './capture-evidence.mjs';
+import { basename, dirname, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export async function buildHandoff(path, analysisPath) {
@@ -36,8 +36,12 @@ export async function buildHandoff(path, analysisPath) {
     const file = await ownFile(root, resolve(analysisPath));
     if (!file || basename(file) !== 'analysis.json' || dirname(file) === root) throw Error('Analysis must be an analysis.json file within the capture run');
     const a = await readJSON(file);
+    const analysisDir = dirname(file);
+    const inPlace = typeof a.workDir === 'string' && resolve(a.workDir) === analysisDir;
+    const copied = a.inputSnapshots !== undefined
+      && relativeArtifactPath(producerRunDir({...r, runDir: a.inputRunDir ?? r.runDir}), a.workDir) === relative(root, analysisDir).split(sep).join('/');
     if (a.schemaVersion !== '0.1.0' || a.inputRunId !== r.runId || a.inputFinalPhase !== finalPhase
-      || a.engine?.name !== 'memlab' || typeof a.workDir !== 'string' || resolve(a.workDir) !== dirname(file)
+      || a.engine?.name !== 'memlab' || (!inPlace && !copied)
       || !['completed', 'failed'].includes(a.status)) {
       throw Error('Analysis does not match this capture run and selected final phase');
     }
@@ -49,7 +53,8 @@ export async function buildHandoff(path, analysisPath) {
     } else {
       evidence.analysis = { report: file, engineVersion: a.engine.version ?? null, candidateCount: null, candidates: null };
       if (a.status === 'completed') {
-        const candidates = await ownFile(dirname(file), a.candidateFile);
+        const candidatePath = inPlace ? a.candidateFile : relativeArtifactPath(a.workDir, a.candidateFile);
+        const candidates = await ownFile(analysisDir, candidatePath);
         if (!candidates || !Number.isSafeInteger(a.candidateCount) || a.candidateCount < 0) throw Error('Analysis candidates are missing or invalid');
         const rows = await readJSON(candidates);
         if (!Array.isArray(rows) || rows.length !== a.candidateCount) throw Error('Analysis candidate count does not match the artifact');
