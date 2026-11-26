@@ -35,6 +35,7 @@ help.commands.push('verify-project --config <project.json> --output <parent-dire
 help.commands.push('resource-regression --before-run <browser-resources.json> --after-run <browser-resources.json> --rules <resource-rules.json> --output <parent-directory>');
 help.commands.push('semantics --snapshot <file> --v8-version <version> --root-ids <ids> --output <parent-directory> [--node-ids <ids>] [--cut-ids <ids>]');
 help.note += ' sites analyzes hash-bound source-site/heap evidence without running the application. Registration/release positions and closed state do not establish a leak or successful resource release.';
+help.commands.push('handoff --run <run-directory> [--analysis <analysis.json>] [--json]');
 help.commands.push('paths --snapshot <file> --node-id <safe-integer> --root-ids <comma-separated-ids> --output <parent-directory> [--edge-policy exclude-weak|all-literal] [--max-depth 0..64] [--max-nodes 1..50000] [--max-edges 0..200000]');
 
 async function analyze(runDir, finalPhase = 'final') {
@@ -78,16 +79,24 @@ try {
   const [command = 'help', ...args] = process.argv.slice(2);
   if (command === 'help' || command === '--help') { emit(help); }
   else {
-    const allowed = command === 'resource-regression' ? ['--before-run', '--after-run', '--rules', '--output'] : command === 'verify-project' ? ['--config', '--output'] : command === 'resource-heap' ? ['--capture', '--output'] : command === 'candidates' ? ['--series', '--resource-run', '--case', '--root-ids', '--output'] : command === 'semantics' ? ['--snapshot', '--v8-version', '--root-ids', '--output', '--node-ids', '--cut-ids'] : command === 'regression' ? ['--before', '--after', '--contract', '--before-run', '--after-run', '--rules', '--output'] : ['capture-sites', 'capture-resources'].includes(command) ? ['--config'] : command === 'dominators' ? ['--snapshot', '--root-ids', '--output', '--edge-policy', '--node-ids', '--cut-ids', '--top'] : command === 'sites' ? ['--capture', '--output', '--node-id'] : command === 'run' ? ['--config', '--snapshots'] : command === 'doctor' ? ['--config'] : command === 'analyze' ? ['--run', '--final-phase'] : command === 'growth' ? ['--run'] : command === 'paths' ? ['--snapshot', '--node-id', '--root-ids', '--output', '--edge-policy', '--max-depth', '--max-nodes', '--max-edges'] : command === 'incoming' ? ['--snapshot', '--node-id', '--output'] : command === 'evidence' ? ['--run', '--growth', '--identity'] : command === 'lifecycle' ? ['--run', '--identity', '--contract'] : command === 'source' ? ['--run', '--identity', '--scripts', '--contract', '--evidence', '--max-source-bytes', '--growth', '--root-ids', '--max-depth', '--max-nodes', '--max-edges', '--source-map-context'] : command === 'intervention' ? ['--run', '--identity', '--scripts', '--contract', '--observations'] : [];
+    const allowed = command === 'handoff' ? ['--run', '--analysis', '--json'] : command === 'resource-regression' ? ['--before-run', '--after-run', '--rules', '--output'] : command === 'verify-project' ? ['--config', '--output'] : command === 'resource-heap' ? ['--capture', '--output'] : command === 'candidates' ? ['--series', '--resource-run', '--case', '--root-ids', '--output'] : command === 'semantics' ? ['--snapshot', '--v8-version', '--root-ids', '--output', '--node-ids', '--cut-ids'] : command === 'regression' ? ['--before', '--after', '--contract', '--before-run', '--after-run', '--rules', '--output'] : ['capture-sites', 'capture-resources'].includes(command) ? ['--config'] : command === 'dominators' ? ['--snapshot', '--root-ids', '--output', '--edge-policy', '--node-ids', '--cut-ids', '--top'] : command === 'sites' ? ['--capture', '--output', '--node-id'] : command === 'run' ? ['--config', '--snapshots'] : command === 'doctor' ? ['--config'] : command === 'analyze' ? ['--run', '--final-phase'] : command === 'growth' ? ['--run'] : command === 'paths' ? ['--snapshot', '--node-id', '--root-ids', '--output', '--edge-policy', '--max-depth', '--max-nodes', '--max-edges'] : command === 'incoming' ? ['--snapshot', '--node-id', '--output'] : command === 'evidence' ? ['--run', '--growth', '--identity'] : command === 'lifecycle' ? ['--run', '--identity', '--contract'] : command === 'source' ? ['--run', '--identity', '--scripts', '--contract', '--evidence', '--max-source-bytes', '--growth', '--root-ids', '--max-depth', '--max-nodes', '--max-edges', '--source-map-context'] : command === 'intervention' ? ['--run', '--identity', '--scripts', '--contract', '--observations'] : [];
     if (!allowed.length) throw new Error('Unknown command: ' + command);
     const options = {};
     for (let i = 0; i < args.length; i++) {
       if (!allowed.includes(args[i]) || options[args[i]] !== undefined) throw new Error('Unknown or duplicate option: ' + args[i]);
       const key = args[i];
-      options[key] = key === '--snapshots' ? true : args[++i];
-      if (!options[key] || (key !== '--snapshots' && options[key].startsWith('--'))) throw new Error('Missing value for ' + key);
+      const isFlag = key === '--snapshots' || key === '--json';
+      options[key] = isFlag ? true : args[++i];
+      if (!options[key] || (!isFlag && options[key].startsWith('--'))) throw new Error('Missing value for ' + key);
     }
-    if (command === 'resource-regression') {
+    if (command === 'handoff') {
+      if (!options['--run']) throw Error('--run is required');
+      const { buildHandoff, renderHandoff } = await import('./handoff.mjs');
+      const result = await buildHandoff(options['--run'], options['--analysis']);
+      if (options['--json']) emit(result);
+      else process.stdout.write(renderHandoff(result));
+      if (result.status.endsWith('-incomplete')) process.exitCode = 2;
+    } else if (command === 'resource-regression') {
       if (['--before-run', '--after-run', '--rules', '--output'].some(flag => !options[flag])) throw Error('--before-run, --after-run, --rules and --output are required');
       const { runResourceRegressionCommand } = await import('./resource-regression-command.mjs');
       const result = await runResourceRegressionCommand(options['--before-run'], options['--after-run'], options['--rules'], options['--output']);
