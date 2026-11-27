@@ -50,7 +50,13 @@ async function analyze(runDir, finalPhase = 'final') {
   const selected = await resolveCaptureInputs(runDir, report, finalPhase, true);
   if (selected.missing.length) throw Error('Missing or invalid snapshot: ' + selected.missing.map(p => p + ' (' + selected.issues[p] + ')').join(', '));
   const snapshots = selected.hashes.map(x => selected.snapshots[x.phase]);
-  const memlabRoot = resolve(require.resolve('memlab/package.json'), '..');
+  let memlabRoot;
+  try {
+    memlabRoot = resolve(require.resolve('memlab/package.json'), '..');
+  } catch (error) {
+    if (error.code !== 'MODULE_NOT_FOUND') throw error;
+    throw new Error('Meta MemLab is not installed. From the Memory Lab checkout run pnpm install --frozen-lockfile --ignore-scripts (without --prod), then retry analyze on the same run.');
+  }
   const manifest = JSON.parse(await readFile(join(memlabRoot, 'package.json'), 'utf8'));
   const workDir = join(runDir, 'memlab-' + Date.now());
   await mkdir(workDir);

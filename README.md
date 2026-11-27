@@ -24,6 +24,10 @@ The public repository contains tool code, tests, and the self-contained RxJS exa
 
 ### Resume a run as an engineer or an agent
 
+To run new Meta MemLab analysis, install with
+`pnpm install --frozen-lockfile --ignore-scripts` (without `--prod`).
+A production-only install can still read captures and attached analyses.
+
 `handoff` is a read-only view of a capture. To transfer a hashed run, copy the
 whole run directory without renaming it or changing its internal layout. Pass
 the recipient's run path to the same CLI; no new capture is needed:
@@ -43,7 +47,10 @@ or a successful repair.
 
 After running the suggested analysis command, add
 `--analysis <path-to-the-run's-analysis.json>` to see the result alongside the
-same capture. Meta MemLab candidates are still hypotheses for review, even if
+same capture. The report is checked against the phase it actually analyzed.
+A fresh handoff still recommends follow-up when available; a direct
+`analyze --run` without `--final-phase` defaults to the first return (`final`).
+Meta MemLab candidates are still hypotheses for review, even if
 there are zero candidates. This command never modifies source, captures new
 evidence, or asserts that a repair works. Keep run artifacts local: they can
 contain application data.

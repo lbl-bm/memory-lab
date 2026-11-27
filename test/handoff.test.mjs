@@ -176,3 +176,41 @@ test('producer path syntax does not control how a recipient reads local files', 
   assert.equal(relativeArtifactPath('/original/run-a', '/original/run-ab/baseline.heapsnapshot'), null);
   assert.equal(relativeArtifactPath('/original/run-a', '/original/run-a/../baseline.heapsnapshot'), null);
 });
+
+test('a capture with followup accepts a bound final analysis without using followup hashes', async t => {
+  const { path, report, r } = await fixture(t);
+  const { createHash } = await import('node:crypto');
+  const sha = text => createHash('sha256').update(text).digest('hex');
+  const finalInputs = r.artifacts.map(a => ({phase:a.phase, bytes:a.bytes, sha256:sha('{}')}));
+  for (const a of r.artifacts) a.sha256=sha('{}');
+  r.snapshotIntegrity='sha256-v1';
+  r.samples=[{phase:'followup'}];
+  const followup=join(path,'followup.heapsnapshot');
+  await writeFile(followup,'[]');
+  r.artifacts.push({kind:'heap-snapshot',phase:'followup',path:followup,bytes:2,sha256:sha('[]')});
+  await serialize(report,r);
+  const fresh=JSON.parse(invoke('--run',path,'--json').stdout);
+  assert.equal(fresh.capture.finalPhase,'followup');
+  assert.equal(fresh.nextActions[0].argv.at(-1),'followup');
+  const workDir=join(path,'analysis'); await mkdir(workDir);
+  const aPath=join(workDir,'analysis.json'), candidateFile=join(workDir,'candidates.json');
+  await serialize(candidateFile,[]);
+  const a={schemaVersion:'0.1.0',status:'completed',inputRunId:'run-a',inputFinalPhase:'final',
+    engine:{name:'memlab',version:'2.0.6'},workDir,candidateFile,candidateCount:0,inputSnapshots:finalInputs};
+  const reopen=()=>invoke('--run',path,'--analysis',aPath,'--json');
+  await serialize(aPath,a);
+  let result=reopen(), h=JSON.parse(result.stdout);
+  assert.equal(result.status,0,result.stdout);
+  assert.equal(h.status,'review-required');
+  assert.equal(h.capture.finalPhase,'final');
+  assert.deepEqual(h.evidence.snapshotIntegrity.inputs,finalInputs);
+  assert.match(invoke('--run',path,'--analysis',aPath).stdout,/comparison phase: final/);
+  await serialize(aPath,{...a,inputFinalPhase:'followup'});
+  result=reopen(); h=JSON.parse(result.stdout);
+  assert.equal(result.status,2);
+  assert.equal(h.status,'analysis-incomplete');
+  assert.equal(h.evidence.analysis,null);
+  assert.deepEqual(h.nextActions,[]);
+  await serialize(aPath,{...a,inputFinalPhase:'baseline'});
+  assert.equal(reopen().status,1);
+});

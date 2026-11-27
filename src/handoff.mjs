@@ -12,7 +12,24 @@ export async function buildHandoff(path, analysisPath) {
     || !['running', 'completed', 'failed'].includes(r.status) || !Array.isArray(r.artifacts)) {
     throw Error('Not a supported Memory Lab capture report for this run directory');
   }
-  const finalPhase = r.samples?.some(x => x.phase === 'followup') ? 'followup' : 'final';
+  let attachment;
+  if (analysisPath !== undefined) {
+    const file = await ownFile(root, resolve(analysisPath));
+    if (!file || basename(file) !== 'analysis.json' || dirname(file) === root) throw Error('Analysis must be an analysis.json file within the capture run');
+    const a = await readJSON(file);
+    const analysisDir = dirname(file);
+    const inPlace = typeof a.workDir === 'string' && resolve(a.workDir) === analysisDir;
+    const copied = a.inputSnapshots !== undefined
+      && relativeArtifactPath(producerRunDir({...r, runDir: a.inputRunDir ?? r.runDir}), a.workDir) === relative(root, analysisDir).split(sep).join('/');
+    if (a.schemaVersion !== '0.1.0' || a.inputRunId !== r.runId || !['final', 'followup'].includes(a.inputFinalPhase)
+      || a.engine?.name !== 'memlab' || (!inPlace && !copied)
+      || !['completed', 'failed'].includes(a.status)) {
+      throw Error('Analysis does not match this capture run or declares an unsupported final phase');
+    }
+    attachment = { file, a, analysisDir, inPlace };
+  }
+  // For a fresh analysis prefer follow-up; an existing report binds its own phase.
+  const finalPhase = attachment?.a.inputFinalPhase ?? (r.samples?.some(x => x.phase === 'followup') ? 'followup' : 'final');
   const selected = await resolveCaptureInputs(root, r, finalPhase, analysisPath !== undefined);
   const {snapshots, missing, issues, hashes, provenance} = selected;
   const evidence = {report: reportPath, snapshots, analysis: null, snapshotIntegrity: {
@@ -32,19 +49,8 @@ export async function buildHandoff(path, analysisPath) {
     nextActions.push({ id: 'analyze', argv: [process.execPath, fileURLToPath(new URL('./cli.mjs', import.meta.url)), 'analyze', '--run', root, '--final-phase', finalPhase] });
   }
 
-  if (analysisPath !== undefined) {
-    const file = await ownFile(root, resolve(analysisPath));
-    if (!file || basename(file) !== 'analysis.json' || dirname(file) === root) throw Error('Analysis must be an analysis.json file within the capture run');
-    const a = await readJSON(file);
-    const analysisDir = dirname(file);
-    const inPlace = typeof a.workDir === 'string' && resolve(a.workDir) === analysisDir;
-    const copied = a.inputSnapshots !== undefined
-      && relativeArtifactPath(producerRunDir({...r, runDir: a.inputRunDir ?? r.runDir}), a.workDir) === relative(root, analysisDir).split(sep).join('/');
-    if (a.schemaVersion !== '0.1.0' || a.inputRunId !== r.runId || a.inputFinalPhase !== finalPhase
-      || a.engine?.name !== 'memlab' || (!inPlace && !copied)
-      || !['completed', 'failed'].includes(a.status)) {
-      throw Error('Analysis does not match this capture run and selected final phase');
-    }
+  if (attachment) {
+    const { file, a, analysisDir, inPlace } = attachment;
     if (status !== 'ready-for-analysis' || (a.inputSnapshots !== undefined && !sameInputHashes(a.inputSnapshots, hashes))
       || (provenance === 'verified' && a.inputSnapshots === undefined)) {
       status = 'analysis-incomplete';
